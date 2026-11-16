@@ -1,0 +1,605 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  cloudflare-prefix-sync: keeps Cloudflare IPv4/IPv6 prefix lists current and, depending on Mode,
+  discovers, audits, attaches or enforces Cloudflare-only ingress on security groups.
+  Sends a have-vs-needs report to SNS. Lambda code is loaded from S3 (see scripts/package_lambda.py).
+  Tag resources by passing stack tags; they propagate to every resource.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Mode" }
+        Parameters: [Mode, DryRun, ScheduleExpression]
+      - Label: { default: "Lambda code (upload with scripts/package_lambda.py)" }
+        Parameters: [CodeS3Bucket, CodeS3Key, CodeBucketHasRegionSuffix]
+      - Label: { default: "Prefix lists" }
+        Parameters: [CreatePrefixLists, ExistingIpv4PrefixListId, ExistingIpv6PrefixListId, ComparePrefixListIds, InitialIpv4MaxEntries, InitialIpv6MaxEntries]
+      - Label: { default: "Security groups" }
+        Parameters: [SecurityGroupIds, ManagedSecurityGroupIds, EnableTagScope, ManagedTagValue, IngressPorts, AllowedCidrs, AllowedPrefixListIds, AllowedSourceSecurityGroupIds, RevokePrivateCidrs, RevokeSecurityGroupSources, MaxRevocationsPerRun]
+      - Label: { default: "Audit and notifications" }
+        Parameters: [AuditEnabled, AuditAllLoadBalancers, NotificationEmail, NotifyOn, NotifyFormat]
+      - Label: { default: "Safety and retention" }
+        Parameters: [MinIpv4Cidrs, MinIpv6Cidrs, MaxRemovalRatio, BackupRetentionDays, LogRetentionDays]
+      - Label: { default: "Deprecated (v1 compatibility)" }
+        Parameters: [TargetAlbSecurityGroupId, AutoAttachToAlbSecurityGroup, AlbIngressPort]
+
+Parameters:
+  # ---------------------------------------------------------------- mode
+  Mode:
+    Type: String
+    Default: sync
+    AllowedValues: [discover, audit, sync, attach, enforce]
+    Description: "How much the tool may do. IAM permissions are granted for this mode only. See docs/MODES.md."
+  DryRun:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: "Preview every write instead of making it."
+  ScheduleExpression:
+    Type: String
+    Default: "rate(6 hours)"
+
+  # ---------------------------------------------------------------- code
+  CodeS3Bucket:
+    Type: String
+    Description: "Bucket holding the Lambda zip. Must be in the stack's region (or see CodeBucketHasRegionSuffix)."
+  CodeS3Key:
+    Type: String
+    Description: "Key of the Lambda zip, as printed by scripts/package_lambda.py."
+  CodeBucketHasRegionSuffix:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: "For StackSets across regions: when true the bucket used is <CodeS3Bucket>-<region>."
+
+  # ---------------------------------------------------------------- prefix lists
+  CreatePrefixLists:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: "Create the managed Cloudflare prefix lists. Set false to manage the existing lists below."
+  ExistingIpv4PrefixListId:
+    Type: String
+    Default: ""
+    Description: "When CreatePrefixLists=false: existing IPv4 prefix list to keep in sync."
+  ExistingIpv6PrefixListId:
+    Type: String
+    Default: ""
+    Description: "When CreatePrefixLists=false: existing IPv6 prefix list to keep in sync."
+  ComparePrefixListIds:
+    Type: String
+    Default: ""
+    Description: "Comma-separated existing prefix lists to compare with Cloudflare and report on. Never modified."
+  InitialIpv4MaxEntries:
+    Type: Number
+    Default: 30
+    MinValue: 15
+    MaxValue: 1000
+  InitialIpv6MaxEntries:
+    Type: Number
+    Default: 20
+    MinValue: 7
+    MaxValue: 1000
+
+  # ---------------------------------------------------------------- security groups
+  SecurityGroupIds:
+    Type: String
+    Default: ""
+    Description: "Comma-separated existing security groups to audit, report on and back up. Never modified."
+  ManagedSecurityGroupIds:
+    Type: String
+    Default: ""
+    Description: "Comma-separated security groups that attach/enforce may change."
+  EnableTagScope:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: "Security groups tagged cloudflare-prefix-sync=<ManagedTagValue> are also in the attach/enforce scope."
+  ManagedTagValue:
+    Type: String
+    Default: "managed"
+    Description: "Tag value that opts a security group in (the tag key is cloudflare-prefix-sync)."
+  IngressPorts:
+    Type: String
+    Default: "443"
+    Description: "Comma-separated TCP ports that must allow Cloudflare."
+  AllowedCidrs:
+    Type: String
+    Default: ""
+    Description: "Comma-separated expected sources (for example a VPN CIDR). Never reported or revoked."
+  AllowedPrefixListIds:
+    Type: String
+    Default: ""
+  AllowedSourceSecurityGroupIds:
+    Type: String
+    Default: ""
+  RevokePrivateCidrs:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  RevokeSecurityGroupSources:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  MaxRevocationsPerRun:
+    Type: Number
+    Default: 25
+    MinValue: 1
+
+  # ---------------------------------------------------------------- audit and notifications
+  AuditEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  AuditAllLoadBalancers:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  NotificationEmail:
+    Type: String
+    Default: ""
+    Description: "Optional email subscribed to the report topic."
+  NotifyOn:
+    Type: String
+    Default: alerts
+    AllowedValues: [never, alerts, drift, always]
+    Description: "When to send the have-vs-needs report. See docs/NOTIFICATIONS.md."
+  NotifyFormat:
+    Type: String
+    Default: text
+    AllowedValues: [text, json]
+
+  # ---------------------------------------------------------------- safety
+  MinIpv4Cidrs:
+    Type: Number
+    Default: 10
+  MinIpv6Cidrs:
+    Type: Number
+    Default: 5
+  MaxRemovalRatio:
+    Type: String
+    Default: "0.50"
+  BackupRetentionDays:
+    Type: Number
+    Default: 365
+    MinValue: 30
+    MaxValue: 3650
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+
+  # ---------------------------------------------------------------- deprecated
+  TargetAlbSecurityGroupId:
+    Type: String
+    Default: ""
+    Description: "DEPRECATED. Use SecurityGroupIds / ManagedSecurityGroupIds."
+  AutoAttachToAlbSecurityGroup:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: "DEPRECATED. Creates static rules on TargetAlbSecurityGroupId."
+  AlbIngressPort:
+    Type: Number
+    Default: 443
+
+Conditions:
+  CreateLists: !Equals [!Ref CreatePrefixLists, "true"]
+  HasExistingIpv4: !Not [!Equals [!Ref ExistingIpv4PrefixListId, ""]]
+  HasExistingIpv6: !Not [!Equals [!Ref ExistingIpv6PrefixListId, ""]]
+  HasIpv4: !Or [!Condition CreateLists, !Condition HasExistingIpv4]
+  HasIpv6: !Or [!Condition CreateLists, !Condition HasExistingIpv6]
+  HasNotificationEmail: !Not [!Equals [!Ref NotificationEmail, ""]]
+  RegionSuffixedCodeBucket: !Equals [!Ref CodeBucketHasRegionSuffix, "true"]
+  CanWritePrefixLists: !Or [!Equals [!Ref Mode, sync], !Equals [!Ref Mode, attach], !Equals [!Ref Mode, enforce]]
+  CanAttach: !Or [!Equals [!Ref Mode, attach], !Equals [!Ref Mode, enforce]]
+  CanRevoke: !Equals [!Ref Mode, enforce]
+  HasManagedSgs: !Not [!Equals [!Ref ManagedSecurityGroupIds, ""]]
+  HasTagScope: !Equals [!Ref EnableTagScope, "true"]
+  AttachListedSgs: !And [!Condition CanAttach, !Condition HasManagedSgs]
+  AttachTaggedSgs: !And [!Condition CanAttach, !Condition HasTagScope]
+  LegacyAttach: !And
+    - !Equals [!Ref AutoAttachToAlbSecurityGroup, "true"]
+    - !Not [!Equals [!Ref TargetAlbSecurityGroupId, ""]]
+  LegacyAttachIpv4: !And [!Condition LegacyAttach, !Condition HasIpv4]
+  LegacyAttachIpv6: !And [!Condition LegacyAttach, !Condition HasIpv6]
+  HasLegacySg: !Not [!Equals [!Ref TargetAlbSecurityGroupId, ""]]
+  IsChinaPartition: !Equals [!Ref AWS::Partition, aws-cn]
+  IsGovPartition: !Equals [!Ref AWS::Partition, aws-us-gov]
+
+Resources:
+  # ------------------------------------------------------------------ prefix lists
+  CloudflareIpv4PrefixList:
+    Type: AWS::EC2::PrefixList
+    Condition: CreateLists
+    Properties:
+      PrefixListName: !Sub "${AWS::StackName}-cloudflare-ipv4"
+      AddressFamily: IPv4
+      MaxEntries: !Ref InitialIpv4MaxEntries
+      Entries:
+        - { Cidr: "103.21.244.0/22", Description: "Cloudflare Edge IPv4" }
+        - { Cidr: "103.22.200.0/22", Description: "Cloudflare Edge IPv4" }
+        - { Cidr: "103.31.4.0/22", Description: "Cloudflare Edge IPv4" }
+        - { Cidr: "104.16.0.0/13", Description: "Cloudflare Edge IPv4" }
+        - { Cidr: "104.24.0.0/14", Description: "Cloudflare Edge IPv4" }
+        - { Cidr: "108.162.192.0/18", Description: "Cloudflare Edge IPv4" }
+        - { Cidr: "131.0.72.0/22", Description: "Cloudflare Edge IPv4" }
+        - { Cidr: "141.101.64.0/18", Description: "Cloudflare Edge IPv4" }
+        - { Cidr: "162.158.0.0/15", Description: "Cloudflare Edge IPv4" }
+        - { Cidr: "172.64.0.0/13", Description: "Cloudflare Edge IPv4" }
+        - { Cidr: "173.245.48.0/20", Description: "Cloudflare Edge IPv4" }
+        - { Cidr: "188.114.96.0/20", Description: "Cloudflare Edge IPv4" }
+        - { Cidr: "190.93.240.0/20", Description: "Cloudflare Edge IPv4" }
+        - { Cidr: "197.234.240.0/22", Description: "Cloudflare Edge IPv4" }
+        - { Cidr: "198.41.128.0/17", Description: "Cloudflare Edge IPv4" }
+
+  CloudflareIpv6PrefixList:
+    Type: AWS::EC2::PrefixList
+    Condition: CreateLists
+    Properties:
+      PrefixListName: !Sub "${AWS::StackName}-cloudflare-ipv6"
+      AddressFamily: IPv6
+      MaxEntries: !Ref InitialIpv6MaxEntries
+      Entries:
+        - { Cidr: "2400:cb00::/32", Description: "Cloudflare Edge IPv6" }
+        - { Cidr: "2405:8100::/32", Description: "Cloudflare Edge IPv6" }
+        - { Cidr: "2405:b500::/32", Description: "Cloudflare Edge IPv6" }
+        - { Cidr: "2606:4700::/32", Description: "Cloudflare Edge IPv6" }
+        - { Cidr: "2803:f800::/32", Description: "Cloudflare Edge IPv6" }
+        - { Cidr: "2a06:98c0::/29", Description: "Cloudflare Edge IPv6" }
+        - { Cidr: "2c0f:f248::/32", Description: "Cloudflare Edge IPv6" }
+
+  # ------------------------------------------------------------------ deprecated static rules (v1 logical IDs kept)
+  AlbIngressIpv4FromCloudflare:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: LegacyAttachIpv4
+    Properties:
+      GroupId: !Ref TargetAlbSecurityGroupId
+      IpProtocol: tcp
+      FromPort: !Ref AlbIngressPort
+      ToPort: !Ref AlbIngressPort
+      SourcePrefixListId: !If [CreateLists, !GetAtt CloudflareIpv4PrefixList.PrefixListId, !Ref ExistingIpv4PrefixListId]
+      Description: "Allow HTTPS from Cloudflare IPv4 Customer-Managed Prefix List"
+
+  AlbIngressIpv6FromCloudflare:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: LegacyAttachIpv6
+    Properties:
+      GroupId: !Ref TargetAlbSecurityGroupId
+      IpProtocol: tcp
+      FromPort: !Ref AlbIngressPort
+      ToPort: !Ref AlbIngressPort
+      SourcePrefixListId: !If [CreateLists, !GetAtt CloudflareIpv6PrefixList.PrefixListId, !Ref ExistingIpv6PrefixListId]
+      Description: "Allow HTTPS from Cloudflare IPv6 Customer-Managed Prefix List"
+
+  # ------------------------------------------------------------------ backups
+  PrefixBackupBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "cf-prefix-sync-backups-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldBackups
+            Status: Enabled
+            ExpirationInDays: !Ref BackupRetentionDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+
+  PrefixBackupBucketTlsPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PrefixBackupBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnforceTLSRequestsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt PrefixBackupBucket.Arn
+              - !Sub "${PrefixBackupBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  # ------------------------------------------------------------------ notifications
+  # Customer managed key: CloudWatch alarms cannot publish to topics encrypted with aws/sns.
+  NotificationKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "${AWS::StackName} SNS topic encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowCloudWatchAlarms
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: ["kms:Decrypt", "kms:GenerateDataKey*"]
+            Resource: "*"
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref AWS::AccountId
+
+  SyncNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-notifications"
+      KmsMasterKeyId: !GetAtt NotificationKey.Arn
+
+  SyncNotificationEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasNotificationEmail
+    Properties:
+      TopicArn: !Ref SyncNotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # ------------------------------------------------------------------ IAM (follows Mode)
+  PrefixSyncLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-lambda-role-${AWS::Region}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: ReadOnlyInventoryAndReporting
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action: ["logs:CreateLogStream", "logs:PutLogEvents"]
+                Resource: !GetAtt PrefixSyncLogGroup.Arn
+              - Sid: ReadOnlyInventory
+                Effect: Allow
+                Action:
+                  - "ec2:DescribeManagedPrefixLists"
+                  - "ec2:GetManagedPrefixListEntries"
+                  - "ec2:DescribeSecurityGroups"
+                  - "ec2:DescribeInstances"
+                  - "elasticloadbalancing:DescribeLoadBalancers"
+                  - "elasticloadbalancing:DescribeListeners"
+                  - "elasticloadbalancing:DescribeRules"
+                  - "cloudfront:ListDistributions"
+                Resource: "*"
+              - Sid: WriteBackups
+                Effect: Allow
+                Action: ["s3:PutObject", "s3:GetObject", "s3:ListBucket"]
+                Resource:
+                  - !GetAtt PrefixBackupBucket.Arn
+                  - !Sub "${PrefixBackupBucket.Arn}/*"
+              - Sid: PublishReports
+                Effect: Allow
+                Action: "sns:Publish"
+                Resource: !Ref SyncNotificationTopic
+              - Sid: EncryptReports
+                Effect: Allow
+                Action: ["kms:GenerateDataKey*", "kms:Decrypt"]
+                Resource: !GetAtt NotificationKey.Arn
+
+  ModifyPrefixListsPolicy:
+    Type: AWS::IAM::RolePolicy
+    Condition: CanWritePrefixLists
+    Properties:
+      RoleName: !Ref PrefixSyncLambdaRole
+      PolicyName: ModifyManagedPrefixListsOnly
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: ["ec2:ModifyManagedPrefixList", "ec2:RestoreManagedPrefixListVersion"]
+            Resource:
+              - !If
+                - CreateLists
+                - !GetAtt CloudflareIpv4PrefixList.Arn
+                - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:prefix-list/${ExistingIpv4PrefixListId}"
+              - !If
+                - CreateLists
+                - !GetAtt CloudflareIpv6PrefixList.Arn
+                - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:prefix-list/${ExistingIpv6PrefixListId}"
+
+  ChangeListedSecurityGroupsPolicy:
+    Type: AWS::IAM::RolePolicy
+    Condition: AttachListedSgs
+    Properties:
+      RoleName: !Ref PrefixSyncLambdaRole
+      PolicyName: ChangeListedSecurityGroups
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: !If
+              - CanRevoke
+              - ["ec2:AuthorizeSecurityGroupIngress", "ec2:RevokeSecurityGroupIngress"]
+              - ["ec2:AuthorizeSecurityGroupIngress"]
+            # "sg-1,sg-2" -> ["arn:<p>:ec2:*:*:security-group/sg-1", "arn:<p>:ec2:*:*:security-group/sg-2"]
+            # Fn::Join needs a literal delimiter, so the partition is chosen with a condition.
+            # Security group IDs are unique, so the region/account wildcards do not widen scope.
+            Resource: !Split
+              - ","
+              - !Sub
+                - "arn:${AWS::Partition}:ec2:*:*:security-group/${Joined}"
+                - Joined: !If
+                    - IsChinaPartition
+                    - !Join [",arn:aws-cn:ec2:*:*:security-group/", !Split [",", !Join ["", !Split [" ", !Ref ManagedSecurityGroupIds]]]]
+                    - !If
+                      - IsGovPartition
+                      - !Join [",arn:aws-us-gov:ec2:*:*:security-group/", !Split [",", !Join ["", !Split [" ", !Ref ManagedSecurityGroupIds]]]]
+                      - !Join [",arn:aws:ec2:*:*:security-group/", !Split [",", !Join ["", !Split [" ", !Ref ManagedSecurityGroupIds]]]]
+
+  ChangeTaggedSecurityGroupsPolicy:
+    Type: AWS::IAM::RolePolicy
+    Condition: AttachTaggedSgs
+    Properties:
+      RoleName: !Ref PrefixSyncLambdaRole
+      PolicyName: ChangeTaggedSecurityGroups
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: !If
+              - CanRevoke
+              - ["ec2:AuthorizeSecurityGroupIngress", "ec2:RevokeSecurityGroupIngress"]
+              - ["ec2:AuthorizeSecurityGroupIngress"]
+            Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*"
+            Condition:
+              StringEquals:
+                "aws:ResourceTag/cloudflare-prefix-sync": !Ref ManagedTagValue
+
+  SecurityGroupRuleResourcesPolicy:
+    Type: AWS::IAM::RolePolicy
+    Condition: CanAttach
+    Properties:
+      RoleName: !Ref PrefixSyncLambdaRole
+      PolicyName: SecurityGroupRuleResources
+      PolicyDocument:
+        Version: "2012-10-17"
+        # The security group ARN statements above limit scope; rule and prefix list ARNs alone grant nothing.
+        Statement:
+          - Effect: Allow
+            Action: !If
+              - CanRevoke
+              - ["ec2:AuthorizeSecurityGroupIngress", "ec2:RevokeSecurityGroupIngress"]
+              - ["ec2:AuthorizeSecurityGroupIngress"]
+            Resource:
+              - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group-rule/*"
+              - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:prefix-list/*"
+
+  # ------------------------------------------------------------------ Lambda
+  PrefixSyncLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-sync"
+      RetentionInDays: !Ref LogRetentionDays
+
+  PrefixSyncLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-sync"
+      Description: !Sub "Cloudflare-only ingress (${Mode} mode)"
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: lambda_handler.lambda_handler
+      Role: !GetAtt PrefixSyncLambdaRole.Arn
+      MemorySize: 256
+      Timeout: 180
+      LoggingConfig:
+        LogGroup: !Ref PrefixSyncLogGroup
+      Code:
+        S3Bucket: !If [RegionSuffixedCodeBucket, !Sub "${CodeS3Bucket}-${AWS::Region}", !Ref CodeS3Bucket]
+        S3Key: !Ref CodeS3Key
+      Environment:
+        Variables:
+          MODE: !Ref Mode
+          DRY_RUN: !Ref DryRun
+          IPV4_PREFIX_LIST_ID: !If [CreateLists, !GetAtt CloudflareIpv4PrefixList.PrefixListId, !Ref ExistingIpv4PrefixListId]
+          IPV6_PREFIX_LIST_ID: !If [CreateLists, !GetAtt CloudflareIpv6PrefixList.PrefixListId, !Ref ExistingIpv6PrefixListId]
+          COMPARE_PREFIX_LIST_IDS: !Ref ComparePrefixListIds
+          SECURITY_GROUP_IDS: !If
+            - HasLegacySg
+            - !Join [",", [!Ref TargetAlbSecurityGroupId, !Ref SecurityGroupIds]]
+            - !Ref SecurityGroupIds
+          MANAGED_SECURITY_GROUP_IDS: !Ref ManagedSecurityGroupIds
+          MANAGED_TAG_KEY: !If [HasTagScope, "cloudflare-prefix-sync", ""]
+          MANAGED_TAG_VALUE: !Ref ManagedTagValue
+          INGRESS_PORTS: !Ref IngressPorts
+          ALLOWED_CIDRS: !Ref AllowedCidrs
+          ALLOWED_PREFIX_LIST_IDS: !Ref AllowedPrefixListIds
+          ALLOWED_SOURCE_SECURITY_GROUP_IDS: !Ref AllowedSourceSecurityGroupIds
+          REVOKE_PRIVATE_CIDRS: !Ref RevokePrivateCidrs
+          REVOKE_SECURITY_GROUP_SOURCES: !Ref RevokeSecurityGroupSources
+          MAX_REVOCATIONS_PER_RUN: !Ref MaxRevocationsPerRun
+          AUDIT_ENABLED: !Ref AuditEnabled
+          AUDIT_ALL_LOAD_BALANCERS: !Ref AuditAllLoadBalancers
+          BACKUP_S3_BUCKET: !Ref PrefixBackupBucket
+          BACKUP_S3_PREFIX: "backups"
+          SNS_TOPIC_ARN: !Ref SyncNotificationTopic
+          NOTIFY_ON: !Ref NotifyOn
+          NOTIFY_FORMAT: !Ref NotifyFormat
+          MIN_IPV4_CIDRS: !Ref MinIpv4Cidrs
+          MIN_IPV6_CIDRS: !Ref MinIpv6Cidrs
+          MAX_REMOVAL_RATIO: !Ref MaxRemovalRatio
+
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-errors"
+      AlarmDescription: "cloudflare-prefix-sync Lambda failed. Check its CloudWatch Logs."
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref PrefixSyncLambdaFunction
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref SyncNotificationTopic]
+
+  # ------------------------------------------------------------------ schedule
+  ScheduledSyncRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${AWS::StackName}-schedule"
+      Description: !Sub "Runs cloudflare-prefix-sync (${Mode})."
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Id: PrefixSyncLambdaTarget
+          Arn: !GetAtt PrefixSyncLambdaFunction.Arn
+
+  LambdaInvokePermissionForEvents:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PrefixSyncLambdaFunction
+      Action: "lambda:InvokeFunction"
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledSyncRule.Arn
+
+Outputs:
+  Mode:
+    Value: !Ref Mode
+  CloudflareIpv4PrefixListId:
+    Description: "Managed IPv4 prefix list. Reference it from security group rules."
+    Value: !If [CreateLists, !GetAtt CloudflareIpv4PrefixList.PrefixListId, !Ref ExistingIpv4PrefixListId]
+  CloudflareIpv6PrefixListId:
+    Description: "Managed IPv6 prefix list."
+    Value: !If [CreateLists, !GetAtt CloudflareIpv6PrefixList.PrefixListId, !Ref ExistingIpv6PrefixListId]
+  BackupBucketName:
+    Value: !Ref PrefixBackupBucket
+  SyncLambdaFunctionName:
+    Value: !Ref PrefixSyncLambdaFunction
+  SyncLambdaFunctionArn:
+    Value: !GetAtt PrefixSyncLambdaFunction.Arn
+  NotificationTopicArn:
+    Description: "SNS topic for the have-vs-needs report and error alarms."
+    Value: !Ref SyncNotificationTopic

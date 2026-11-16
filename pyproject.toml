@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cloudflare-prefix-sync"
+version = "2.0.0"
+description = "Make Cloudflare the only way into your AWS origins: discover, audit, sync, attach or enforce Cloudflare-only ingress with AWS prefix lists and security groups."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["aws", "cloudflare", "security-group", "prefix-list", "lambda", "origin-protection"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking :: Firewalls",
+]
+dependencies = [
+    "boto3>=1.28.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/OWNER/cloudflare-prefix-sync"
+Documentation = "https://github.com/OWNER/cloudflare-prefix-sync/tree/main/docs"
+Changelog = "https://github.com/OWNER/cloudflare-prefix-sync/blob/main/CHANGELOG.md"
+
+[tool.setuptools]
+packages = ["src"]

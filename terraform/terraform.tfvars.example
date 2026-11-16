@@ -1,0 +1,42 @@
+# Copy to terraform.tfvars and edit. Every value below is optional.
+aws_region  = "us-east-1"
+name_prefix = "cloudflare-prefix-sync"
+
+# discover | audit | sync | attach | enforce  (docs/MODES.md)
+# Start with "audit", move up one step at a time.
+mode    = "audit"
+dry_run = false
+
+# Who gets the have-vs-needs report: never | alerts | drift | always
+notification_email = "security-team@example.com"
+notify_on          = "alerts"
+notify_format      = "text"
+
+# --- Prefix lists -----------------------------------------------------------
+create_prefix_lists = true
+# Manage existing lists instead of creating new ones:
+# create_prefix_lists          = false
+# existing_ipv4_prefix_list_id = "pl-0123456789abcdef0"
+# existing_ipv6_prefix_list_id = "pl-0fedcba9876543210"
+
+# Existing lists to compare with Cloudflare and report on (never modified):
+# compare_prefix_list_ids = ["pl-0aaaabbbbccccdddd"]
+
+# --- Security groups --------------------------------------------------------
+# Audited and reported on, never modified:
+security_group_ids = ["sg-0123456789abcdef0"]
+
+# Changed by attach / enforce:
+# managed_security_group_ids = ["sg-0123456789abcdef0"]
+# ...or tag a security group cloudflare-prefix-sync=managed to opt it in.
+
+ingress_ports = [443]
+
+# Sources that are expected and must never be reported or revoked:
+# allowed_cidrs = ["198.51.100.10/32"]
+
+# --- Tags applied to every resource ----------------------------------------
+tags = {
+  Owner       = "security-team@example.com"
+  Environment = "prod"
+}
