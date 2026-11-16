@@ -1,6 +1,6 @@
 # cloudflare-prefix-sync
 
-[![CI](https://github.com/OWNER/cloudflare-prefix-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/cloudflare-prefix-sync/actions/workflows/ci.yml)
+[![CI](https://github.com/ksravikumar2005/cloudflare-prefix-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/ksravikumar2005/cloudflare-prefix-sync/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Make Cloudflare the only way into your AWS origins.
@@ -80,7 +80,7 @@ MEDIUM FINDINGS (1)
 Needs Python 3.10+, `boto3` and credentials with read access.
 
 ```bash
-git clone https://github.com/OWNER/cloudflare-prefix-sync.git
+git clone https://github.com/ksravikumar2005/cloudflare-prefix-sync.git
 cd cloudflare-prefix-sync
 pip install boto3
 

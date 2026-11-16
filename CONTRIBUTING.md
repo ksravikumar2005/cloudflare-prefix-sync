@@ -10,7 +10,7 @@ Thanks for helping. Bug reports, documentation fixes and pull requests are all w
 ## Development setup
 
 ```bash
-git clone https://github.com/OWNER/cloudflare-prefix-sync.git
+git clone https://github.com/ksravikumar2005/cloudflare-prefix-sync.git
 cd cloudflare-prefix-sync
 python -m venv .venv
 . .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1

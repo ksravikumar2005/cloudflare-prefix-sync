@@ -23,9 +23,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/OWNER/cloudflare-prefix-sync"
-Documentation = "https://github.com/OWNER/cloudflare-prefix-sync/tree/main/docs"
-Changelog = "https://github.com/OWNER/cloudflare-prefix-sync/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/ksravikumar2005/cloudflare-prefix-sync"
+Documentation = "https://github.com/ksravikumar2005/cloudflare-prefix-sync/tree/main/docs"
+Changelog = "https://github.com/ksravikumar2005/cloudflare-prefix-sync/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
 packages = ["src"]

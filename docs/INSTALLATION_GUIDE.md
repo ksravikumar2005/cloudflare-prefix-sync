@@ -22,7 +22,7 @@ Prefix lists and security groups are regional. Every option runs in one region p
 ## CLI (no deployment)
 
 ```bash
-git clone https://github.com/OWNER/cloudflare-prefix-sync.git
+git clone https://github.com/ksravikumar2005/cloudflare-prefix-sync.git
 cd cloudflare-prefix-sync
 pip install boto3
 

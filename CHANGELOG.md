@@ -50,6 +50,6 @@ See [docs/INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md#upgrading-from-v1) f
 - Scheduled sync of Cloudflare IPv4 and IPv6 ranges into customer managed prefix lists, with validation, minimum counts, removal-ratio circuit breaker, pre-update backups and rollback.
 - CloudFormation, Terraform, CLI and GitHub Actions deployment options.
 
-[Unreleased]: https://github.com/OWNER/cloudflare-prefix-sync/compare/v2.0.0...HEAD
-[2.0.0]: https://github.com/OWNER/cloudflare-prefix-sync/compare/v1.0.0...v2.0.0
-[1.0.0]: https://github.com/OWNER/cloudflare-prefix-sync/releases/tag/v1.0.0
+[Unreleased]: https://github.com/ksravikumar2005/cloudflare-prefix-sync/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/ksravikumar2005/cloudflare-prefix-sync/compare/v1.0.0...v2.0.0
+[1.0.0]: https://github.com/ksravikumar2005/cloudflare-prefix-sync/releases/tag/v1.0.0
