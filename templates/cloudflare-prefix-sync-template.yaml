@@ -20,6 +20,8 @@ Metadata:
         Parameters: [AuditEnabled, AuditAllLoadBalancers, NotificationEmail, NotifyOn, NotifyFormat]
       - Label: { default: "Safety and retention" }
         Parameters: [MinIpv4Cidrs, MinIpv6Cidrs, MaxRemovalRatio, BackupRetentionDays, LogRetentionDays]
+      - Label: { default: "Demo (docs/DEMO.md)" }
+        Parameters: [DemoVpcId]
       - Label: { default: "Deprecated (v1 compatibility)" }
         Parameters: [TargetAlbSecurityGroupId, AutoAttachToAlbSecurityGroup, AlbIngressPort]
 
@@ -169,6 +171,15 @@ Parameters:
     Default: 90
     AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
 
+  # ---------------------------------------------------------------- demo
+  DemoVpcId:
+    Type: String
+    Default: ""
+    Description: >-
+      Demo only (docs/DEMO.md): create a security group in this VPC allowing the first IngressPorts
+      port from the managed prefix lists, and tag the prefix lists and group so scripts/demo.py may
+      break them on purpose. Leave empty in real deployments.
+
   # ---------------------------------------------------------------- deprecated
   TargetAlbSecurityGroupId:
     Type: String
@@ -204,6 +215,10 @@ Conditions:
   LegacyAttachIpv4: !And [!Condition LegacyAttach, !Condition HasIpv4]
   LegacyAttachIpv6: !And [!Condition LegacyAttach, !Condition HasIpv6]
   HasLegacySg: !Not [!Equals [!Ref TargetAlbSecurityGroupId, ""]]
+  CreateDemo: !Not [!Equals [!Ref DemoVpcId, ""]]
+  CreateDemoIpv4: !And [!Condition CreateDemo, !Condition HasIpv4]
+  CreateDemoIpv6: !And [!Condition CreateDemo, !Condition HasIpv6]
+  DemoAttach: !And [!Condition CreateDemo, !Condition CanAttach]
   IsChinaPartition: !Equals [!Ref AWS::Partition, aws-cn]
   IsGovPartition: !Equals [!Ref AWS::Partition, aws-us-gov]
 
@@ -232,6 +247,10 @@ Resources:
         - { Cidr: "190.93.240.0/20", Description: "Cloudflare Edge IPv4" }
         - { Cidr: "197.234.240.0/22", Description: "Cloudflare Edge IPv4" }
         - { Cidr: "198.41.128.0/17", Description: "Cloudflare Edge IPv4" }
+      Tags: !If
+        - CreateDemo
+        - [{ Key: cloudflare-prefix-sync-demo, Value: !Ref AWS::StackName }]
+        - !Ref AWS::NoValue
 
   CloudflareIpv6PrefixList:
     Type: AWS::EC2::PrefixList
@@ -248,6 +267,43 @@ Resources:
         - { Cidr: "2803:f800::/32", Description: "Cloudflare Edge IPv6" }
         - { Cidr: "2a06:98c0::/29", Description: "Cloudflare Edge IPv6" }
         - { Cidr: "2c0f:f248::/32", Description: "Cloudflare Edge IPv6" }
+      Tags: !If
+        - CreateDemo
+        - [{ Key: cloudflare-prefix-sync-demo, Value: !Ref AWS::StackName }]
+        - !Ref AWS::NoValue
+
+  # ------------------------------------------------------------------ demo security group (docs/DEMO.md)
+  DemoSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateDemo
+    Properties:
+      GroupDescription: "cloudflare-prefix-sync demo security group (safe to delete)"
+      VpcId: !Ref DemoVpcId
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-demo" }
+        - { Key: cloudflare-prefix-sync-demo, Value: !Ref AWS::StackName }
+
+  DemoIngressIpv4:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: CreateDemoIpv4
+    Properties:
+      GroupId: !Ref DemoSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Select [0, !Split [",", !Ref IngressPorts]]
+      ToPort: !Select [0, !Split [",", !Ref IngressPorts]]
+      SourcePrefixListId: !If [CreateLists, !GetAtt CloudflareIpv4PrefixList.PrefixListId, !Ref ExistingIpv4PrefixListId]
+      Description: "Cloudflare IPv4 (demo)"
+
+  DemoIngressIpv6:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: CreateDemoIpv6
+    Properties:
+      GroupId: !Ref DemoSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Select [0, !Split [",", !Ref IngressPorts]]
+      ToPort: !Select [0, !Split [",", !Ref IngressPorts]]
+      SourcePrefixListId: !If [CreateLists, !GetAtt CloudflareIpv6PrefixList.PrefixListId, !Ref ExistingIpv6PrefixListId]
+      Description: "Cloudflare IPv6 (demo)"
 
   # ------------------------------------------------------------------ deprecated static rules (v1 logical IDs kept)
   AlbIngressIpv4FromCloudflare:
@@ -454,6 +510,22 @@ Resources:
                       - !Join [",arn:aws-us-gov:ec2:*:*:security-group/", !Split [",", !Join ["", !Split [" ", !Ref ManagedSecurityGroupIds]]]]
                       - !Join [",arn:aws:ec2:*:*:security-group/", !Split [",", !Join ["", !Split [" ", !Ref ManagedSecurityGroupIds]]]]
 
+  ChangeDemoSecurityGroupPolicy:
+    Type: AWS::IAM::RolePolicy
+    Condition: DemoAttach
+    Properties:
+      RoleName: !Ref PrefixSyncLambdaRole
+      PolicyName: ChangeDemoSecurityGroup
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: !If
+              - CanRevoke
+              - ["ec2:AuthorizeSecurityGroupIngress", "ec2:RevokeSecurityGroupIngress"]
+              - ["ec2:AuthorizeSecurityGroupIngress"]
+            Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${DemoSecurityGroup.GroupId}"
+
   ChangeTaggedSecurityGroupsPolicy:
     Type: AWS::IAM::RolePolicy
     Condition: AttachTaggedSgs
@@ -522,11 +594,16 @@ Resources:
           IPV4_PREFIX_LIST_ID: !If [CreateLists, !GetAtt CloudflareIpv4PrefixList.PrefixListId, !Ref ExistingIpv4PrefixListId]
           IPV6_PREFIX_LIST_ID: !If [CreateLists, !GetAtt CloudflareIpv6PrefixList.PrefixListId, !Ref ExistingIpv6PrefixListId]
           COMPARE_PREFIX_LIST_IDS: !Ref ComparePrefixListIds
-          SECURITY_GROUP_IDS: !If
-            - HasLegacySg
-            - !Join [",", [!Ref TargetAlbSecurityGroupId, !Ref SecurityGroupIds]]
-            - !Ref SecurityGroupIds
-          MANAGED_SECURITY_GROUP_IDS: !Ref ManagedSecurityGroupIds
+          # Empty items are ignored by the Lambda, so unused slots can be "".
+          SECURITY_GROUP_IDS: !Join
+            - ","
+            - - !If [HasLegacySg, !Ref TargetAlbSecurityGroupId, ""]
+              - !Ref SecurityGroupIds
+              - !If [CreateDemo, !GetAtt DemoSecurityGroup.GroupId, ""]
+          MANAGED_SECURITY_GROUP_IDS: !Join
+            - ","
+            - - !Ref ManagedSecurityGroupIds
+              - !If [CreateDemo, !GetAtt DemoSecurityGroup.GroupId, ""]
           MANAGED_TAG_KEY: !If [HasTagScope, "cloudflare-prefix-sync", ""]
           MANAGED_TAG_VALUE: !Ref ManagedTagValue
           INGRESS_PORTS: !Ref IngressPorts
@@ -603,3 +680,7 @@ Outputs:
   NotificationTopicArn:
     Description: "SNS topic for the have-vs-needs report and error alarms."
     Value: !Ref SyncNotificationTopic
+  DemoSecurityGroupId:
+    Condition: CreateDemo
+    Description: "Demo security group. Use with scripts/demo.py use-deployed --stack-name."
+    Value: !GetAtt DemoSecurityGroup.GroupId

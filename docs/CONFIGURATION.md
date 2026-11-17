@@ -77,6 +77,7 @@ A compare-only list's address family is read from the list, so it is compared wi
 | `tags` | stack tags (`--tags`) | Tags on every resource. |
 | | `CodeS3Bucket`, `CodeS3Key` | Lambda zip location, from `scripts/package_lambda.py`. |
 | | `CodeBucketHasRegionSuffix` | Use `<CodeS3Bucket>-<region>` (StackSets). |
+| `demo_vpc_id` | `DemoVpcId` | Demo only: create a demo security group in this VPC and tag the managed prefix lists so `scripts/demo.py` may break them. See [DEMO.md](DEMO.md). |
 | `target_alb_security_group_id`, `auto_attach_to_alb_security_group`, `alb_ingress_port` | `TargetAlbSecurityGroupId`, `AutoAttachToAlbSecurityGroup`, `AlbIngressPort` | Deprecated v1 settings, kept so existing rules are not recreated. |
 
 ## Lambda event examples

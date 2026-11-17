@@ -32,3 +32,8 @@ output "notification_topic_arn" {
   description = "SNS topic that receives the have-vs-needs report and error alarms."
   value       = aws_sns_topic.sync_notifications.arn
 }
+
+output "demo_security_group_id" {
+  description = "Demo security group (only when demo_vpc_id is set). Use with scripts/demo.py use-deployed."
+  value       = try(aws_security_group.demo[0].id, "")
+}

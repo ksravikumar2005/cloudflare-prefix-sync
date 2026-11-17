@@ -119,13 +119,15 @@ def build_gap_report(
                     "status": "compliant" if not needs else (
                         "remediated" if all(n["applied"] for n in needs) else "needs_change")})
 
-    findings = (summary.get("audit") or {}).get("findings", []) + \
+    # Findings describe the state after this run: use the re-audit when changes were applied.
+    current_audit = summary.get("audit_after") or summary.get("audit") or {}
+    findings = current_audit.get("findings", []) + \
         (summary.get("discovery") or {}).get("findings", [])
     by_sev: Dict[str, List[Dict[str, Any]]] = {"HIGH": [], "MEDIUM": [], "LOW": []}
     for f in findings:
         by_sev.setdefault(f["severity"], []).append(f)
 
-    errors = list((summary.get("audit") or {}).get("errors", [])) + \
+    errors = list(current_audit.get("errors", [])) + \
         list((summary.get("discovery") or {}).get("errors", [])) + \
         [e["error"] if isinstance(e, dict) else str(e) for e in remediation.get("errors", [])]
 
@@ -193,7 +195,7 @@ def render_text(report: Dict[str, Any], summary: Dict[str, Any]) -> str:
             out += _cap([f"      - {c}" for c in p["to_remove"]])
 
     if report["security_groups"]:
-        out += ["", "SECURITY GROUPS  (what can reach them vs what must change)"]
+        out += ["", "SECURITY GROUPS  (what could reach them at the start of this run vs what must change)"]
         for s in report["security_groups"]:
             label = f" {s['name']}" if s.get("name") else ""
             out.append(f"  {s['group_id']}{label}  [{s['exposure']}]  status: {s['status']}")

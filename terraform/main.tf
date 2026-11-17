@@ -19,6 +19,15 @@ locals {
   managed_prefix_list_ids  = compact([local.ipv4_prefix_list_id, local.ipv6_prefix_list_id])
   managed_prefix_list_arns = [for id in local.managed_prefix_list_ids : "${local.arn_prefix}:prefix-list/${id}"]
 
+  # Known at plan time. count / for_each must not depend on IDs that only exist after apply.
+  has_ipv4         = var.create_prefix_lists || trimspace(var.existing_ipv4_prefix_list_id) != ""
+  has_ipv6         = var.create_prefix_lists || trimspace(var.existing_ipv6_prefix_list_id) != ""
+  managed_families = concat(local.has_ipv4 ? ["ipv4"] : [], local.has_ipv6 ? ["ipv6"] : [])
+  prefix_list_by_family = {
+    ipv4 = local.ipv4_prefix_list_id
+    ipv6 = local.ipv6_prefix_list_id
+  }
+
   clean = {
     security_group_ids         = [for s in var.security_group_ids : trimspace(s) if trimspace(s) != ""]
     managed_security_group_ids = [for s in var.managed_security_group_ids : trimspace(s) if trimspace(s) != ""]
@@ -26,14 +35,20 @@ locals {
     tf_attach_sg_ids           = toset([for s in var.terraform_attach_security_group_ids : trimspace(s) if trimspace(s) != ""])
   }
 
-  legacy_sg_id     = trimspace(var.target_alb_security_group_id)
-  attach_legacy_sg = var.auto_attach_to_alb_security_group && local.legacy_sg_id != ""
-  audited_sg_ids   = distinct(compact(concat(local.clean.security_group_ids, [local.legacy_sg_id], tolist(local.clean.tf_attach_sg_ids))))
-  managed_sg_arns  = [for id in local.clean.managed_security_group_ids : "${local.arn_prefix}:security-group/${id}"]
-  use_tag_scope    = trimspace(var.managed_tag_key) != ""
+  # Demo (docs/DEMO.md): a throwaway security group, and a tag that lets scripts/demo.py break things
+  create_demo = trimspace(var.demo_vpc_id) != ""
+  demo_tags   = local.create_demo ? { "cloudflare-prefix-sync-demo" = var.name_prefix } : {}
+  demo_sg_ids = aws_security_group.demo[*].id
+
+  legacy_sg_id       = trimspace(var.target_alb_security_group_id)
+  attach_legacy_sg   = var.auto_attach_to_alb_security_group && local.legacy_sg_id != ""
+  audited_sg_ids     = distinct(compact(concat(local.clean.security_group_ids, [local.legacy_sg_id], tolist(local.clean.tf_attach_sg_ids), local.demo_sg_ids)))
+  managed_sg_ids_all = concat(local.clean.managed_security_group_ids, local.demo_sg_ids)
+  managed_sg_arns    = [for id in local.managed_sg_ids_all : "${local.arn_prefix}:security-group/${id}"]
+  use_tag_scope      = trimspace(var.managed_tag_key) != ""
   tf_attach_pairs = {
-    for pair in setproduct(tolist(local.clean.tf_attach_sg_ids), local.managed_prefix_list_ids, var.ingress_ports) :
-    "${pair[0]}|${pair[1]}|${pair[2]}" => { sg = pair[0], pl = pair[1], port = pair[2] }
+    for pair in setproduct(tolist(local.clean.tf_attach_sg_ids), local.managed_families, var.ingress_ports) :
+    "${pair[0]}|${pair[1]}|${pair[2]}" => { sg = pair[0], pl = local.prefix_list_by_family[pair[1]], port = pair[2] }
   }
 
   has_email        = trimspace(var.notification_email) != ""
@@ -57,7 +72,7 @@ locals {
 
 check "prefix_lists_for_mode" {
   assert {
-    condition     = !local.can_write_prefix_lists || length(local.managed_prefix_list_ids) > 0
+    condition     = !local.can_write_prefix_lists || length(local.managed_families) > 0
     error_message = "mode ${var.mode} updates prefix lists: set create_prefix_lists = true or supply existing_ipv4_prefix_list_id / existing_ipv6_prefix_list_id."
   }
 }
@@ -80,7 +95,7 @@ resource "aws_ec2_managed_prefix_list" "cloudflare_ipv4" {
     }
   }
 
-  tags = merge(local.common_tags, { Name = "${var.name_prefix}-cloudflare-ipv4" })
+  tags = merge(local.common_tags, local.demo_tags, { Name = "${var.name_prefix}-cloudflare-ipv4" })
 
   lifecycle {
     ignore_changes = [entry, max_entries]
@@ -101,7 +116,7 @@ resource "aws_ec2_managed_prefix_list" "cloudflare_ipv6" {
     }
   }
 
-  tags = merge(local.common_tags, { Name = "${var.name_prefix}-cloudflare-ipv6" })
+  tags = merge(local.common_tags, local.demo_tags, { Name = "${var.name_prefix}-cloudflare-ipv6" })
 
   lifecycle {
     ignore_changes = [entry, max_entries]
@@ -134,7 +149,7 @@ resource "aws_vpc_security_group_ingress_rule" "cloudflare" {
 
 # v1 compatibility: same addresses as before so existing rules are not recreated
 resource "aws_vpc_security_group_ingress_rule" "alb_from_cloudflare_ipv4" {
-  count             = local.attach_legacy_sg && local.ipv4_prefix_list_id != "" ? 1 : 0
+  count             = local.attach_legacy_sg && local.has_ipv4 ? 1 : 0
   security_group_id = local.legacy_sg_id
   ip_protocol       = "tcp"
   from_port         = var.alb_ingress_port
@@ -145,13 +160,48 @@ resource "aws_vpc_security_group_ingress_rule" "alb_from_cloudflare_ipv4" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "alb_from_cloudflare_ipv6" {
-  count             = local.attach_legacy_sg && local.ipv6_prefix_list_id != "" ? 1 : 0
+  count             = local.attach_legacy_sg && local.has_ipv6 ? 1 : 0
   security_group_id = local.legacy_sg_id
   ip_protocol       = "tcp"
   from_port         = var.alb_ingress_port
   to_port           = var.alb_ingress_port
   prefix_list_id    = local.ipv6_prefix_list_id
   description       = "Allow HTTPS from Cloudflare IPv6 Customer-Managed Prefix List"
+  tags              = local.common_tags
+}
+
+# -----------------------------------------------------------------------------
+# 2b. Demo security group (only when demo_vpc_id is set; see docs/DEMO.md)
+#     No inline rules, so changes made by the demo or by attach/enforce do not
+#     fight with Terraform. The Cloudflare rules are separate resources.
+# -----------------------------------------------------------------------------
+resource "aws_security_group" "demo" {
+  count       = local.create_demo ? 1 : 0
+  name        = "${var.name_prefix}-demo"
+  description = "cloudflare-prefix-sync demo security group (safe to delete)"
+  vpc_id      = trimspace(var.demo_vpc_id)
+  tags        = merge(local.common_tags, local.demo_tags, { Name = "${var.name_prefix}-demo" })
+}
+
+resource "aws_vpc_security_group_ingress_rule" "demo_ipv4" {
+  count             = local.create_demo && local.has_ipv4 ? length(var.ingress_ports) : 0
+  security_group_id = aws_security_group.demo[0].id
+  ip_protocol       = "tcp"
+  from_port         = var.ingress_ports[count.index]
+  to_port           = var.ingress_ports[count.index]
+  prefix_list_id    = local.ipv4_prefix_list_id
+  description       = "Cloudflare IPv4 (demo)"
+  tags              = local.common_tags
+}
+
+resource "aws_vpc_security_group_ingress_rule" "demo_ipv6" {
+  count             = local.create_demo && local.has_ipv6 ? length(var.ingress_ports) : 0
+  security_group_id = aws_security_group.demo[0].id
+  ip_protocol       = "tcp"
+  from_port         = var.ingress_ports[count.index]
+  to_port           = var.ingress_ports[count.index]
+  prefix_list_id    = local.ipv6_prefix_list_id
+  description       = "Cloudflare IPv6 (demo)"
   tags              = local.common_tags
 }
 
@@ -334,7 +384,7 @@ data "aws_iam_policy_document" "lambda" {
   }
 
   dynamic "statement" {
-    for_each = local.can_write_prefix_lists && length(local.managed_prefix_list_arns) > 0 ? [1] : []
+    for_each = local.can_write_prefix_lists && length(local.managed_families) > 0 ? [1] : []
     content {
       sid       = "ModifyManagedPrefixListsOnly"
       actions   = ["ec2:ModifyManagedPrefixList", "ec2:RestoreManagedPrefixListVersion"]
@@ -418,7 +468,7 @@ resource "aws_lambda_function" "prefix_sync" {
       IPV6_PREFIX_LIST_ID               = local.ipv6_prefix_list_id
       COMPARE_PREFIX_LIST_IDS           = join(",", local.clean.compare_prefix_list_ids)
       SECURITY_GROUP_IDS                = join(",", local.audited_sg_ids)
-      MANAGED_SECURITY_GROUP_IDS        = join(",", local.clean.managed_security_group_ids)
+      MANAGED_SECURITY_GROUP_IDS        = join(",", local.managed_sg_ids_all)
       MANAGED_TAG_KEY                   = trimspace(var.managed_tag_key)
       MANAGED_TAG_VALUE                 = var.managed_tag_value
       INGRESS_PORTS                     = join(",", [for p in var.ingress_ports : tostring(p)])

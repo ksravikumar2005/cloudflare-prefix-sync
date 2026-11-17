@@ -433,9 +433,14 @@ def create_pre_update_backup(
             "(backup_s3_bucket or backup_local_dir) must be configured before applying updates."
         )
 
-    ts_compact = utc_compact_timestamp()
     now_dt = datetime.datetime.now(datetime.timezone.utc)
-    backup_id = f"cf-prefix-backup-{ts_compact}"
+    # Millisecond precision so two runs in the same second never share a name; still sorts by time.
+    backup_id = f"cf-prefix-backup-{now_dt.strftime('%Y%m%dT%H%M%S')}{now_dt.microsecond // 1000:03d}Z"
+    if config.backup_local_dir:
+        base, n = backup_id, 1
+        while os.path.exists(os.path.join(config.backup_local_dir, f"{backup_id}.json")):
+            n += 1
+            backup_id = f"{base}-{n}"
 
     tracked_pl_ids = [st["prefix_list_id"] for st in prefix_list_states.values()]
     security_groups = discover_referencing_security_groups(

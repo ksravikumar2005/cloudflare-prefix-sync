@@ -4,6 +4,17 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/demo.py`: creates (or adopts) demo prefix lists and a security group, breaks them on purpose (remove Cloudflare ranges, add a bogus range, open to `0.0.0.0/0`, drop a Cloudflare rule), runs the automation and shows the backup and repair. See [docs/DEMO.md](docs/DEMO.md).
+- `demo_vpc_id` (Terraform) / `DemoVpcId` (CloudFormation) to deploy a demo security group with the stack.
+
+### Fixed
+
+- Two backups written in the same second had the same name, so the second overwrote the first locally. Backup IDs now include milliseconds, and a local name clash gets a suffix.
+- After live security group changes, the report's findings and headline now reflect the state after the run (the post-change audit), not before.
+- Terraform: `count` / `for_each` for the v1 compatibility rules and `terraform_attach_security_group_ids` depended on prefix list IDs unknown until apply, which failed `terraform plan` on a first deployment.
+
 ## [2.0.0] - 2026-11-16
 
 ### Added

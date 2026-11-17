@@ -117,6 +117,12 @@ variable "terraform_attach_security_group_ids" {
   default     = []
 }
 
+variable "demo_vpc_id" {
+  description = "Demo only: create a security group in this VPC that allows ingress_ports from the managed prefix lists, and tag the deployment's prefix lists and that group so scripts/demo.py may break them on purpose. Leave empty in real deployments. See docs/DEMO.md."
+  type        = string
+  default     = ""
+}
+
 variable "ingress_ports" {
   description = "TCP ports that must allow Cloudflare."
   type        = list(number)

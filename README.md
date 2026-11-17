@@ -56,7 +56,7 @@ PREFIX LISTS  (have vs what Cloudflare publishes)
       + 104.16.0.0/13
       - 9.9.9.0/24
 
-SECURITY GROUPS  (what can reach them vs what must change)
+SECURITY GROUPS  (what could reach them at the start of this run vs what must change)
   sg-0123456789abcdef0 web-alb  [open_to_internet]  status: needs_change
     have:
       tcp/443-443 from 0.0.0.0/0 [open_to_internet]
@@ -94,6 +94,14 @@ python scripts/sync_cloudflare_ips.py --mode audit --region us-east-1 --format t
 ```
 
 Nothing is written without `--execute`.
+
+### Or try it on throwaway resources first
+
+```bash
+python scripts/demo.py --region us-east-1 walkthrough
+```
+
+This creates a demo prefix list pair and security group, removes some Cloudflare ranges and opens the group to `0.0.0.0/0`, then shows the automation backing up the broken state and repairing it. See [docs/DEMO.md](docs/DEMO.md).
 
 ### 2. Deploy with Terraform
 
@@ -144,6 +152,7 @@ About $1 per month per region, almost all of it the KMS key that encrypts the SN
 
 | Document | Contents |
 | :--- | :--- |
+| [docs/DEMO.md](docs/DEMO.md) | Hands-on demo: break a prefix list and security group on purpose, watch the backup and repair |
 | [docs/MODES.md](docs/MODES.md) | Each mode in detail, IAM per mode, rollout plan |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every setting, with its Lambda variable, CLI flag, Terraform variable and CloudFormation parameter |
 | [docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md) | Report contents, notification policies, formats, subscribing |
